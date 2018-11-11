@@ -54,7 +54,7 @@ struct note_t
 	float frequency;
 	tone_t tone;
 	int octave;
-	note_position_t positions[ 5 ];
+	note_position_t positions[ 6 ];
 };
 
 #pragma comment(lib, "DSound.lib")
@@ -186,7 +186,7 @@ int app_proc(app_t* app, void* user_data)
 	const int number_of_notes = 49;
 	note_t notes[ number_of_notes ] = { 0 };
 
-	for( int j = TONE_E; j < TONE_Ds; ++j )
+	for( int j = TONE_E; j <= TONE_Ds; ++j )
 	{
 		tone_t tone = (tone_t)j;
 		float base_freq = 0;
@@ -210,24 +210,24 @@ int app_proc(app_t* app, void* user_data)
 			
 		for( int octave = 0; octave < 5; ++octave ) // maximum number of octaves
 		{
-			if( base_freq > 1318.51f ) break;
+			if( base_freq > 1318.52f ) break;
 			if( tone + (octave * 11) >= number_of_notes ) break;
 
 			// create note entry
-			notes[ tone + ( octave * 11 ) ].frequency = base_freq;
-			notes[ tone + ( octave * 11 ) ].octave = octave;
-			notes[ tone + ( octave * 11 ) ].tone = tone;
+			notes[ tone + ( octave * 12 ) ].frequency = base_freq;
+			notes[ tone + ( octave * 12 ) ].octave = octave;
+			notes[ tone + ( octave * 12 ) ].tone = tone;
 			base_freq *= 2;
 		}
 	}
 
 
 	// find all positions on fretboard, string by string
-	for( int string = STRING_LOW_E; string < STRING_HIGH_E; ++string )
+	for( int string = STRING_LOW_E; string <= STRING_HIGH_E; ++string )
 	{
 		int start_note_position = 5 * ( string - 1 );
 		if( string > STRING_G ) --start_note_position;
-		for( int fret = 0; fret < 24; ++fret )
+		for( int fret = 0; fret < 25; ++fret )
 		{
 			int position = 0;
 			for( int position = 0; position < 6; ++position )
@@ -330,11 +330,13 @@ int app_proc(app_t* app, void* user_data)
 		}
 
 		int max_freq = bin_size * index_max;
+		int active_note_index;
 		for( int i = 0; i < number_of_notes; ++i )
 		{
-			if( abs( notes[ i ].frequency - max_freq ) < bin_size )
+			if( abs( notes[ i ].frequency - max_freq ) <= bin_size )
 			{
-
+				active_note_index = i;
+				break;
 			}
 		}
 		memset( canvas, 0xC0, sizeof( APP_U32 ) * SCREEN_HEIGHT * SCREEN_WIDTH ); // clear to grey
@@ -351,8 +353,8 @@ int app_proc(app_t* app, void* user_data)
 		}
 
 		// draw frets
-		int fret_space = ( SCREEN_WIDTH - 20 - 70 ) / 24;
-		for( int i = 0; i < 24; ++i )
+		int fret_space = ( SCREEN_WIDTH - 20 - 70 ) / 25;
+		for( int i = 0; i < 25; ++i )
 		{
 			line( 70 + fret_space * ( i + 1 ),
 				SCREEN_HEIGHT / 2,
@@ -381,14 +383,13 @@ int app_proc(app_t* app, void* user_data)
 				case TONE_Ds: sprintf( buffer, "D#%i", notes[ i ].octave ); break;
 			}
 
-			int position_index = 0;
-			while( notes[ i ].positions[ position_index ].string > STRING_INVALID )
+			for( int position_index = 0; position_index <= 6; ++position_index )
 			{
-				sysfont_9x16_u32( canvas, SCREEN_WIDTH, SCREEN_HEIGHT, 
+				if( notes[ i ].positions[ position_index ].string == STRING_INVALID ) break;
+				sysfont_9x16_u32( canvas, SCREEN_WIDTH, SCREEN_HEIGHT,
 					70 + fret_space * (notes[ i ].positions[ position_index ].fret),
 					(SCREEN_HEIGHT / 2) - (notes[ i ].positions[ position_index ].string * string_space),
-					buffer, 0x00ff0000 );
-				++position_index;
+					buffer, active_note_index == i ? 0x00ffff00 : 0x00ff0000 );
 			}
 		}
 
