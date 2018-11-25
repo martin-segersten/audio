@@ -15,6 +15,10 @@
 #include "..\libs\sysfont.h"
 
 #define M_PI 3.14159265358979323846 // Pi constant with double precision
+#define BUFFER_SAMPLE_SIZE 8192
+#define BYTES_PER_SAMPLE 2
+#define DSOUND_BUFFER_BYTE_SIZE ( BUFFER_SAMPLE_SIZE * BYTES_PER_SAMPLE * 2)
+
 
 enum tone_t
 {
@@ -158,7 +162,7 @@ HRESULT CreateCaptureBuffer( LPDIRECTSOUNDCAPTURE8 pDSC, LPDIRECTSOUNDCAPTUREBUF
 	if( (NULL == pDSC) || (NULL == ppDSCB8) ) return E_INVALIDARG;
 	dscbd.dwSize = sizeof( DSCBUFFERDESC );
 	dscbd.dwFlags = 0;
-	dscbd.dwBufferBytes = wfx.nAvgBytesPerSec;
+	dscbd.dwBufferBytes = DSOUND_BUFFER_BYTE_SIZE;
 	dscbd.dwReserved = 0;
 	dscbd.lpwfxFormat = &wfx;
 	dscbd.dwFXCount = 0;
@@ -250,29 +254,45 @@ int app_proc(app_t* app, void* user_data)
 
 	LPGUID guid;
 	LPDIRECTSOUNDCAPTUREBUFFER8 buffer;
+	DSBPOSITIONNOTIFY buffer_notification[ 2 ];
+	HANDLE on_event = CreateEvent( NULL, TRUE, FALSE, NULL );
 
-	bool read_mic = false;
+	memset( buffer_notification, 0, sizeof( buffer_notification ) );
+
+	bool read_mic = true;
 	if( read_mic )
 	{
 		HRESULT hr = DirectSoundCaptureEnumerate( (LPDSENUMCALLBACK)DSEnumCallback, (VOID*)&guid );
 
 		LPDIRECTSOUNDCAPTURE8 lpds;
+		LPDIRECTSOUNDNOTIFY notification = NULL;
 		hr = DirectSoundCaptureCreate8( guid, &lpds, NULL );
 		CreateCaptureBuffer( lpds, &buffer );
+
+		if( FAILED( hr = buffer->QueryInterface( IID_IDirectSoundNotify,
+			(VOID**)&notification ) ) ){ }
+
+		buffer_notification[ 0 ].dwOffset = ( DSOUND_BUFFER_BYTE_SIZE / 2 ) - 1;
+		buffer_notification[ 0 ].hEventNotify = on_event;
+		buffer_notification[ 1 ].dwOffset = DSOUND_BUFFER_BYTE_SIZE - 1;
+		buffer_notification[ 1 ].hEventNotify = on_event;
+		notification->SetNotificationPositions( 2, buffer_notification );
 		buffer->Start( DSCBSTART_LOOPING );
 
 	}
-	static uint8_t data_buffer[ 17640 * 2 ];
-	static std::complex<double> fft_buffer[ 17640 * 2 ];
-	static std::complex<double> result_buffer[ 17640 * 2 ];
-	static double amplitude[ 17640 * 2 ];
-	static double han_window_multiplier[ 17640 * 2 ];
 
-	// apply hann window
-	for( int i = 0; i < 17640 * 2; ++i )
-		han_window_multiplier[ i ] = 0.5 * (1 - cos( 2 * M_PI * i / ((17640 * 2) - 1.0) ));
+	static uint16_t data_buffer[ BUFFER_SAMPLE_SIZE ];
+	static std::complex<double> fft_buffer[ BUFFER_SAMPLE_SIZE * 2 ];
+	static std::complex<double> result_buffer[ BUFFER_SAMPLE_SIZE * 2 ];
+	static double amplitude[ BUFFER_SAMPLE_SIZE * 2 ];
+	static double han_window_multiplier[ BUFFER_SAMPLE_SIZE * 2 ];
+
+	// create han window
+	for( int i = 0; i < BUFFER_SAMPLE_SIZE * 2; ++i )
+		han_window_multiplier[ i ] = 0.5 * (1 - cos( 2 * M_PI * i / ((BUFFER_SAMPLE_SIZE * 2) - 1.0) ));
 
 	// keep running until the user close the window
+	int ack = 82;
 	while( app_yield( app ) != APP_STATE_EXIT_REQUESTED )
 	{
 		// 44100 * 0.05 * 0.5 = ~1100hz högsta frekvens att detecta
@@ -282,55 +302,71 @@ int app_proc(app_t* app, void* user_data)
 		int nr_samples = 0;
 		if( read_mic )
 		{
-			Sleep( 200 );
-			DWORD read_pos;
-			DWORD cap_pos;
-			buffer->GetCurrentPosition( &cap_pos, &read_pos );
+
+			DWORD wait_result = WaitForMultipleObjects( 1, &on_event, false, 2000 );
+			if( wait_result != WAIT_OBJECT_0 ) continue;
+
+			DWORD current_pos;
+			DWORD hr;
+			if( FAILED( hr = buffer->GetCurrentPosition( 0, &current_pos ) ) )
+			{
+				assert( false );
+			}
+
+			DWORD read_pos = current_pos <= ( DSOUND_BUFFER_BYTE_SIZE - 1 ) ? ( DSOUND_BUFFER_BYTE_SIZE - 1 ) : 0;
+
 			VOID* first_block = 0;
 			DWORD first_block_size = 0;
 			VOID* second_block = 0;
 			DWORD second_block_size = 0;
-			buffer->Lock( read_pos, cap_pos, &first_block, &first_block_size, &second_block, &second_block_size, 0 );
-			memcpy( data_buffer, first_block, first_block_size );
-			if( second_block ) memcpy( data_buffer + first_block_size, second_block, second_block_size );
+			buffer->Lock( read_pos, DSOUND_BUFFER_BYTE_SIZE / 2, &first_block, &first_block_size, &second_block, &second_block_size, 0 );
+			
+			memcpy( (uint8_t*)data_buffer, first_block, (int)first_block_size );
+			if( second_block ) memcpy( (uint8_t*)data_buffer + (int)first_block_size, second_block, (int)second_block_size );
+
 			buffer->Unlock( first_block, first_block_size, second_block, second_block_size );
 			nr_samples = (first_block_size + second_block_size) / 2;
 
 			for( int i = 0; i < nr_samples; ++i )
 			{
-				fft_buffer[ i ] = (double)data_buffer[ i * 2 ] * han_window_multiplier[ i ];
-				result_buffer[ i ] = (double)data_buffer[ i * 2 ] * han_window_multiplier[ i ];
+				fft_buffer[ i ] = (double)(data_buffer[ i ]);// * han_window_multiplier[ i ];
+				result_buffer[ i ] = (double)(data_buffer[ i ]) * han_window_multiplier[ i ];
 			}
 		}
 		else
 		{
-			nr_samples = 44100 / 5;
+			Sleep( 100 );
+			nr_samples = BUFFER_SAMPLE_SIZE;
 			for( int i = 0; i < nr_samples; ++i )
 			{
-				double seconds = (0.2 / nr_samples) * i;
-				fft_buffer[ i ] = cos( 2 * M_PI * 440 * seconds );
+				double step = (1.0f / 44100.0f) * i;
+				fft_buffer[ i ] = cos( 2 * M_PI * 83 * step ) * han_window_multiplier[ i ];
+
 				result_buffer[ i ] = fft_buffer[ i ];
 			}
+			ack += 10;
+			if( ack >= 1500 ) ack = 82;
 		}
 
 		if( nr_samples == 0 ) continue;
-		fft2( result_buffer, nr_samples ); // nr_samples / 2 = fft_bin
-		//int bin_size = ( 4096 * 2) / nr_samples; // (4096*4 / 2) / (nr_samples / 2)
-		int bin_size = (44100 / 2) / (nr_samples / 2);
+		fft2( result_buffer, nr_samples );
+		double bin_size = 44100.0f / nr_samples;
 		double max_amp = 0;
 		int index_max = 0;
-		for( int i = 1; i < nr_samples / 2; i++ )
+		int start_index = (floor( 82.4069f / bin_size ));
+		int end_index = (ceil( 1318.51f / bin_size )) <= (nr_samples / 2) ? (ceil( 1318.51f / bin_size )) : nr_samples / 2;
+		for( int i = start_index; i < end_index; i++ )
 		{
-			amplitude[ i ] = 0.01 * sqrt( (result_buffer[ i ].real() * result_buffer[ i ].real()) + (result_buffer[ i ].imag() * result_buffer[ i ].imag()) );
-			if( amplitude[ i ] > max_amp )
+			amplitude[ i ] = sqrt( (result_buffer[ i ].real() * result_buffer[ i ].real()) + (result_buffer[ i ].imag() * result_buffer[ i ].imag()) );
+			if( amplitude[ i ] > max_amp && amplitude[ i ] > 7500000 )
 			{
 				index_max = i;
 				max_amp = amplitude[ i ];
 			}
 		}
 
-		int max_freq = bin_size * index_max;
-		int active_note_index;
+		double max_freq = bin_size * (index_max);
+		int active_note_index = -1;
 		for( int i = 0; i < number_of_notes; ++i )
 		{
 			if( abs( notes[ i ].frequency - max_freq ) <= bin_size )
@@ -393,13 +429,21 @@ int app_proc(app_t* app, void* user_data)
 			}
 		}
 
-		// draw frequency domain
-		for( int i = 1; i < nr_samples / 2; ++i )
+		// draw top frequency
 		{
-			line( i / 4 + 20, 1080 - 20, i / 4 + 20, (1080 - 20 - amplitude[ i ]) < 0 ? 20 : (1080 - 20 - amplitude[ i ]), canvas );
+			char buffer[ 50 ] = { 0 };
+			sprintf( buffer, "%f - %f", max_freq, (max_freq + bin_size) );
+			sysfont_9x16_u32( canvas, SCREEN_WIDTH, SCREEN_HEIGHT, 100, 200, buffer, 0x00ff0000 );
 		}
 
-
+		// draw frequency domain
+		for( int i = start_index; i < end_index; ++i )
+		{
+			line( i * 6 + 20, 
+				1080 - 20,
+				i * 6 + 20,
+				(1080 - 20 - amplitude[ i ] * 0.00001) < 0 ? 20 : (1080 - 20 - amplitude[ i ] * 0.00001), canvas );
+		}
 
 		app_present( app, canvas, SCREEN_WIDTH, SCREEN_HEIGHT, 0xffffff, 0x000000 );
 	}
